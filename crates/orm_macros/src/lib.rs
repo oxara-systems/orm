@@ -11,6 +11,8 @@ use syn::{
 };
 
 enum FnKind {
+    Count,
+    Exist,
     Get,
     GetId,
     Is,
@@ -295,6 +297,18 @@ impl Table {
         }
 
         match fn_kind {
+            FnKind::Count => {
+                let sql = &format!(
+                    r#"SELECT COUNT(*) FROM "{table_name}" {query}"#,
+                );
+                self.fns.push(quote! {
+                    pub async fn #fn_name(tx: &mut impl orm::ReadableTransaction, #(#params),*) -> orm::sqlx::Result<i64> {
+                        let count = orm::sqlx::query_scalar!(#sql, #(#bindings),*)
+                            .fetch_one(tx.connection()).await?;
+                        Ok(count.unwrap_or_default())
+                    }
+                });
+            }
             FnKind::Get => {
                 let sql =
                     &format!(r#"SELECT {column_names_typed} FROM "{table_name}" {query} LIMIT 1"#,);
@@ -346,7 +360,7 @@ impl Table {
                     });
                 }
             }
-            FnKind::Is => {
+            FnKind::Exist | FnKind::Is => {
                 let sql = &format!(
                     r#"SELECT COUNT(*) > 0 AS "bool!" FROM "{table_name}" {query} LIMIT 1"#,
                 );
@@ -400,7 +414,13 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
 
     let struct_name = ast.ident.clone();
     let mut table_name = struct_name.to_string().to_case(Case::Snake);
-    table_name.push('s');
+    if !table_name.ends_with("es") {
+        if table_name.ends_with("s") {
+            table_name.push_str("es");
+        } else {
+            table_name.push('s');
+        }
+    }
     let fields: Vec<_> = named_fields.named.clone().into_iter().collect();
     let field_map: HashMap<_, _> = fields
         .clone()
@@ -490,7 +510,11 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
         let fn_name = func.path.get_ident().unwrap().clone();
         let fn_name_string = fn_name.to_string();
 
-        if fn_name_string.starts_with("get_id_") {
+        if fn_name_string.starts_with("count_") {
+            table.userfn(FnKind::Count, fn_name, call.args);
+        } else if fn_name_string.starts_with("exist_") {
+            table.userfn(FnKind::Exist, fn_name, call.args);
+        } else if fn_name_string.starts_with("get_id_") {
             table.userfn(FnKind::GetId, fn_name, call.args);
         } else if fn_name_string.starts_with("get_") {
             table.userfn(FnKind::Get, fn_name, call.args);
