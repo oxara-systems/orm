@@ -1,0 +1,13 @@
+[package]
+name = "orm_examples"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+orm = { path = "../orm" }
+sqlx = { version = "0.8.6", default-features = false, features = [
+    "derive",
+    "macros",
+    "postgres",
+    "runtime-tokio",
+] }
