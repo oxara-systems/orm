@@ -33,8 +33,8 @@ pub struct UserId(pub Uuid);
 //   - get_* returns a Option<T>
 //   - list_* returns a Vec<T>
 #[derive(Model)]
-#[orm(get_by_name("where name = $1", (name, str)))]
-#[orm(list_adults("where age >= 18"))]
+#[orm(fn get_by_name(name: &str) { "WHERE name = $1" })]
+#[orm(fn list_adults() { "WHERE age >= 18" })]
 pub struct User {
     pub id: UserId,
     pub age: i32,
@@ -124,7 +124,7 @@ pub struct UserId(pub Uuid);
 
 #[derive(Model)]
 #[orm(primary_keys(organization_id, user_id))]
-#[orm(is_owner("where organization_id = $1 and user_id = $2 and role = 'Owner'", (organization_id, OrganizationId), (user_id, UserId)))]
+#[orm(fn is_owner(organization_id: OrganizationId, user_id: UserId) { "where organization_id = $1 and user_id = $2 and role = 'Owner'" })]
 pub struct OrganizationUser {
     pub organization_id: OrganizationId,
     pub user_id: UserId,

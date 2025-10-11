@@ -6,18 +6,9 @@ use proc_macro2::Span;
 use quote::quote;
 use regex::Regex;
 use syn::{
-    parse_macro_input, parse_quote, punctuated::Punctuated, spanned::Spanned, token::Comma, Data,
-    DeriveInput, Error, Expr, Field, Fields, FnArg, Ident, Lit,
+    parse_macro_input, parse_quote, spanned::Spanned, Data, DeriveInput, Error, Expr, Field,
+    Fields, FnArg, Ident, ItemFn, Lit, ReturnType, Stmt,
 };
-
-enum FnKind {
-    Count,
-    Exist,
-    Get,
-    GetId,
-    Is,
-    List,
-}
 
 struct Table {
     fields: Vec<Field>,
@@ -228,18 +219,32 @@ impl Table {
         });
     }
 
-    fn userfn(&mut self, fn_kind: FnKind, fn_name: Ident, args: Punctuated<Expr, Comma>) {
-        let mut args_iter = args.iter();
-        let query = args_iter.next().unwrap();
+    fn userfn(&mut self, item_fn: ItemFn) {
+        macro_rules! fail {
+            ($span:expr, $message:expr) => {
+                self.fns
+                    .push(Error::new($span, $message).to_compile_error());
+                return;
+            };
+        }
+
+        let fn_name = item_fn.sig.ident;
+        let fn_name_string = fn_name.to_string();
+
+        let ret = item_fn.sig.output;
+
+        // query
+        let Some(query) = item_fn.block.stmts.first() else {
+            fail!(item_fn.block.span(), "expected query string literal");
+        };
+        let Stmt::Expr(query, _) = query else {
+            fail!(query.span(), "expected query string literal");
+        };
         let Expr::Lit(query) = query else {
-            self.fns
-                .push(Error::new(query.span(), "expected query string literal").to_compile_error());
-            return;
+            fail!(query.span(), "expected query string literal");
         };
         let Lit::Str(query) = &query.lit else {
-            self.fns
-                .push(Error::new(query.span(), "expected query string literal").to_compile_error());
-            return;
+            fail!(query.span(), "expected query string literal");
         };
         let query = query.value();
 
@@ -249,28 +254,12 @@ impl Table {
 
         let mut params: Vec<FnArg> = Vec::new();
         let mut bindings = Vec::new();
-        for arg in args_iter {
-            let Expr::Tuple(tuple) = &arg else {
-                self.fns.push(
-                    Error::new(
-                        arg.span(),
-                        "expected tuple containing function parameter in the form of: (name, Type)",
-                    )
-                    .to_compile_error(),
-                );
-                return;
+        for arg in &item_fn.sig.inputs {
+            let FnArg::Typed(arg) = &arg else {
+                fail!(arg.span(), "expected non-self parameter");
             };
-            let mut iter = tuple.elems.iter();
-            let Some(name) = iter.next() else {
-                self.fns
-                    .push(Error::new(arg.span(), "expected parameter name").to_compile_error());
-                return;
-            };
-            let Some(ty) = iter.next() else {
-                self.fns
-                    .push(Error::new(arg.span(), "expected parameter type").to_compile_error());
-                return;
-            };
+            let name = &arg.pat;
+            let ty = &arg.ty;
             params.push(parse_quote! { #name: &#ty });
             bindings.push(quote! { #name as _ });
         }
@@ -281,105 +270,161 @@ impl Table {
             .map(|x| x.as_str().to_string())
             .collect();
         if placeholders.len() != params.len() {
-            self.fns.push(
-                Error::new(
-                    args.span(),
-                    format!(
-                        "{} expects {} parameters, but has {}",
-                        fn_name,
-                        placeholders.len(),
-                        params.len()
-                    ),
+            fail!(
+                item_fn.sig.inputs.span(),
+                format!(
+                    "{} expects {} parameters, but has {}",
+                    fn_name,
+                    placeholders.len(),
+                    params.len()
                 )
-                .to_compile_error(),
             );
-            return;
         }
 
-        match fn_kind {
-            FnKind::Count => {
-                let sql = &format!(
-                    r#"SELECT COUNT(*) FROM "{table_name}" {query}"#,
+        if fn_name_string.starts_with("count_") {
+            let sql = &format!(r#"SELECT COUNT(*) FROM "{table_name}" {query}"#,);
+            self.fns.push(quote! {
+                pub async fn #fn_name(tx: &mut impl orm::ReadableTransaction, #(#params),*) -> orm::sqlx::Result<i64> {
+                    let count = orm::sqlx::query_scalar!(#sql, #(#bindings),*)
+                        .fetch_one(tx.connection()).await?;
+                    Ok(count.unwrap_or_default())
+                }
+            });
+        } else if fn_name_string.starts_with("exist_") || fn_name_string.starts_with("is_") {
+            let sql =
+                &format!(r#"SELECT COUNT(*) > 0 AS "bool!" FROM "{table_name}" {query} LIMIT 1"#,);
+            self.fns.push(quote! {
+                pub async fn #fn_name(tx: &mut impl orm::ReadableTransaction, #(#params),*) -> orm::sqlx::Result<bool> {
+                    orm::sqlx::query_scalar!(#sql, #(#bindings),*)
+                        .fetch_one(tx.connection()).await
+                }
+            });
+        } else if fn_name_string.starts_with("get_id_") {
+            if self.primary_keys.len() == 1 {
+                let field = self.primary_keys.first().unwrap();
+                let name = field.ident.as_ref().unwrap();
+                let ty = &field.ty;
+                let query = &format!(
+                    r#"SELECT "{name}" as "{name}: _" FROM "{table_name}" {query} LIMIT 1"#,
                 );
                 self.fns.push(quote! {
-                    pub async fn #fn_name(tx: &mut impl orm::ReadableTransaction, #(#params),*) -> orm::sqlx::Result<i64> {
-                        let count = orm::sqlx::query_scalar!(#sql, #(#bindings),*)
-                            .fetch_one(tx.connection()).await?;
-                        Ok(count.unwrap_or_default())
+                    pub async fn #fn_name(tx: &mut impl orm::ReadableTransaction, #(#params),*) -> orm::sqlx::Result<Option<#ty>> {
+                        orm::sqlx::query_scalar!(#query, #(#bindings),*)
+                            .fetch_optional(tx.connection()).await
+                    }
+                });
+            } else {
+                let mut columns = Vec::new();
+                let mut fields = Vec::new();
+                let mut ret = Vec::new();
+                let mut tys = Vec::new();
+                for field in &self.primary_keys {
+                    let name = field.ident.as_ref().unwrap();
+                    let ty = &field.ty;
+                    columns.push(format!(r#""{name}" as "{name}: _""#));
+                    fields.push(quote! { #name: #ty });
+                    ret.push(quote! { ids.#name });
+                    tys.push(ty);
+                }
+                let columns = columns.join(", ");
+                let query = &format!(r#"SELECT {columns} FROM "{table_name}" {query} LIMIT 1"#,);
+                self.fns.push(quote! {
+                    pub async fn #fn_name(tx: &mut impl orm::ReadableTransaction, #(#params),*) -> orm::sqlx::Result<Option<(#(#tys),*)>> {
+                        #[derive(sqlx::FromRow)]
+                        struct Ids { #(#fields),* };
+                        let ids = orm::sqlx::query_as!(Ids, #query, #(#bindings),*)
+                            .fetch_optional(tx.connection()).await?;
+                        Ok(ids.map(|ids| (#(#ret),*)))
                     }
                 });
             }
-            FnKind::Get => {
-                let sql =
-                    &format!(r#"SELECT {column_names_typed} FROM "{table_name}" {query} LIMIT 1"#,);
+        } else if fn_name_string.starts_with("get_") {
+            let ret_span = ret.span();
+            let (sql, ret, is_scalar) = match ret {
+                ReturnType::Default => (
+                    format!(r#"SELECT {column_names_typed} FROM "{table_name}" {query} LIMIT 1"#),
+                    quote! { Self },
+                    false,
+                ),
+                ReturnType::Type(_, ret) => {
+                    let (ret, is_scalar) = match &*ret {
+                        syn::Type::Path(_) => (quote! { #ret }, false),
+                        syn::Type::Tuple(tuple) => {
+                            if tuple.elems.len() == 1 {
+                                let ret = tuple.elems.first().unwrap();
+                                (quote! { #ret }, true)
+                            } else {
+                                (quote! { #ret }, true)
+                            }
+                        }
+                        _ => {
+                            fail!(ret_span, "Return type must be path or tuple");
+                        }
+                    };
+                    (format!(r#"{query} LIMIT 1"#), ret, is_scalar)
+                }
+            };
+            if is_scalar {
                 self.fns.push(quote! {
-                    pub async fn #fn_name(tx: &mut impl orm::ReadableTransaction, #(#params),*) -> orm::sqlx::Result<Option<Self>> {
+                    pub async fn #fn_name(tx: &mut impl orm::ReadableTransaction, #(#params),*) -> orm::sqlx::Result<Option<#ret>> {
+                        orm::sqlx::query_scalar!(#sql, #(#bindings),*)
+                            .fetch_optional(tx.connection()).await
+                    }
+                });
+            } else {
+                self.fns.push(quote! {
+                    pub async fn #fn_name(tx: &mut impl orm::ReadableTransaction, #(#params),*) -> orm::sqlx::Result<Option<#ret>> {
                         orm::sqlx::query_as!(#struct_name, #sql, #(#bindings),*)
                             .fetch_optional(tx.connection()).await
                     }
                 });
             }
-            FnKind::GetId => {
-                if self.primary_keys.len() == 1 {
-                    let field = self.primary_keys.first().unwrap();
-                    let name = field.ident.as_ref().unwrap();
-                    let ty = &field.ty;
-                    let query = &format!(
-                        r#"SELECT "{name}" as "{name}: _" FROM "{table_name}" {query} LIMIT 1"#,
-                    );
-                    self.fns.push(quote! {
-                        pub async fn #fn_name(tx: &mut impl orm::ReadableTransaction, #(#params),*) -> orm::sqlx::Result<Option<#ty>> {
-                            orm::sqlx::query_scalar!(#query, #(#bindings),*)
-                                .fetch_optional(tx.connection()).await
+        } else if fn_name_string.starts_with("list_") {
+            let ret_span = ret.span();
+            let (sql, ret, is_scalar) = match ret {
+                ReturnType::Default => (
+                    format!(r#"SELECT {column_names_typed} FROM "{table_name}" {query}"#),
+                    quote! { Self },
+                    false,
+                ),
+                ReturnType::Type(_, ret) => {
+                    let (ret, is_scalar) = match &*ret {
+                        syn::Type::Path(_) => (quote! { #ret }, false),
+                        syn::Type::Tuple(tuple) => {
+                            if tuple.elems.len() == 1 {
+                                let ret = tuple.elems.first().unwrap();
+                                (quote! { #ret }, true)
+                            } else {
+                                (quote! { #ret }, true)
+                            }
                         }
-                    });
-                } else {
-                    let mut columns = Vec::new();
-                    let mut fields = Vec::new();
-                    let mut ret = Vec::new();
-                    let mut tys = Vec::new();
-                    for field in &self.primary_keys {
-                        let name = field.ident.as_ref().unwrap();
-                        let ty = &field.ty;
-                        columns.push(format!(r#""{name}" as "{name}: _""#));
-                        fields.push(quote! { #name: #ty });
-                        ret.push(quote! { ids.#name });
-                        tys.push(ty);
-                    }
-                    let columns = columns.join(", ");
-                    let query =
-                        &format!(r#"SELECT {columns} FROM "{table_name}" {query} LIMIT 1"#,);
-                    self.fns.push(quote! {
-                        pub async fn #fn_name(tx: &mut impl orm::ReadableTransaction, #(#params),*) -> orm::sqlx::Result<Option<(#(#tys),*)>> {
-                            #[derive(sqlx::FromRow)]
-                            struct Ids { #(#fields),* };
-                            let ids = orm::sqlx::query_as!(Ids, #query, #(#bindings),*)
-                                .fetch_optional(tx.connection()).await?;
-                            Ok(ids.map(|ids| (#(#ret),*)))
+                        _ => {
+                            fail!(ret_span, "Return type must be path or tuple");
                         }
-                    });
+                    };
+                    (query, ret, is_scalar)
                 }
-            }
-            FnKind::Exist | FnKind::Is => {
-                let sql = &format!(
-                    r#"SELECT COUNT(*) > 0 AS "bool!" FROM "{table_name}" {query} LIMIT 1"#,
-                );
+            };
+            if is_scalar {
                 self.fns.push(quote! {
-                    pub async fn #fn_name(tx: &mut impl orm::ReadableTransaction, #(#params),*) -> orm::sqlx::Result<bool> {
+                    pub async fn #fn_name(tx: &mut impl orm::ReadableTransaction, #(#params),*) -> orm::sqlx::Result<Vec<#ret>> {
                         orm::sqlx::query_scalar!(#sql, #(#bindings),*)
-                            .fetch_one(tx.connection()).await
+                            .fetch_all(tx.connection()).await
                     }
                 });
-            }
-            FnKind::List => {
-                let sql = &format!(r#"SELECT {column_names_typed} FROM "{table_name}" {query}"#,);
+            } else {
                 self.fns.push(quote! {
-                    pub async fn #fn_name(tx: &mut impl orm::ReadableTransaction, #(#params),*) -> orm::sqlx::Result<Vec<Self>> {
-                        orm::sqlx::query_as!(#struct_name, #sql, #(#bindings),*)
+                    pub async fn #fn_name(tx: &mut impl orm::ReadableTransaction, #(#params),*) -> orm::sqlx::Result<Vec<#ret>> {
+                        orm::sqlx::query_as!(#ret, #sql, #(#bindings),*)
                             .fetch_all(tx.connection()).await
                     }
                 });
             }
+        } else {
+            fail!(
+                fn_name.span(),
+                format!("Unknown function prefix {fn_name_string}")
+            );
         }
     }
 
@@ -399,6 +444,7 @@ impl Table {
 #[proc_macro_derive(Model, attributes(orm))]
 pub fn derive_model(input: TokenStream) -> TokenStream {
     let ast = parse_macro_input!(input as DeriveInput);
+    let ast_span = ast.span();
 
     let Data::Struct(s) = &ast.data else {
         return Error::new(ast.span(), "Model can only be derived for structs")
@@ -428,22 +474,23 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
         .map(|field| (field.ident.as_ref().unwrap().to_string(), field))
         .collect();
 
+    let mut attrs = Vec::new();
+
     // determine primary keys
 
     let mut primary_keys = Vec::new();
-    for attr in &ast.attrs {
-        if !attr.path().is_ident("orm") {
-            continue;
-        }
+    for attr in ast.attrs {
         let Ok(list) = attr.meta.require_list() else {
             return Error::new(attr.span(), "Invalid attribute format")
                 .to_compile_error()
                 .into();
         };
-        let Ok(call) = list.parse_args::<syn::ExprCall>() else {
-            return Error::new(attr.span(), "Invalid attribute format")
-                .to_compile_error()
-                .into();
+        let call = match list.parse_args::<syn::ExprCall>() {
+            Ok(call) => call,
+            Err(_) => {
+                attrs.push(attr);
+                continue;
+            }
         };
         let Expr::Path(func) = call.func.as_ref() else {
             return Error::new(attr.span(), "Invalid attribute format")
@@ -474,7 +521,7 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
     if primary_keys.is_empty() {
         let Some(field) = field_map.get("id") else {
             return Error::new(
-                ast.span(),
+                ast_span,
                 format!("expected {struct_name} to contain field id"),
             )
             .to_compile_error()
@@ -498,40 +545,18 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
     table.update();
     table.upsert();
 
-    for attr in &ast.attrs {
-        if !attr.path().is_ident("orm") {
-            continue;
-        }
-        let list = attr.meta.require_list().unwrap();
-        let call: syn::ExprCall = list.parse_args().unwrap();
-        let Expr::Path(func) = call.func.as_ref() else {
-            panic!("expected function call");
+    for attr in attrs {
+        let Ok(list) = attr.meta.require_list() else {
+            return Error::new(attr.span(), "Invalid attribute format")
+                .to_compile_error()
+                .into();
         };
-        let fn_name = func.path.get_ident().unwrap().clone();
-        let fn_name_string = fn_name.to_string();
-
-        if fn_name_string.starts_with("count_") {
-            table.userfn(FnKind::Count, fn_name, call.args);
-        } else if fn_name_string.starts_with("exist_") {
-            table.userfn(FnKind::Exist, fn_name, call.args);
-        } else if fn_name_string.starts_with("get_id_") {
-            table.userfn(FnKind::GetId, fn_name, call.args);
-        } else if fn_name_string.starts_with("get_") {
-            table.userfn(FnKind::Get, fn_name, call.args);
-        } else if fn_name_string.starts_with("is_") {
-            table.userfn(FnKind::Is, fn_name, call.args);
-        } else if fn_name_string.starts_with("list_") {
-            table.userfn(FnKind::List, fn_name, call.args);
-        } else if fn_name == "primary_keys" {
-            continue;
-        } else {
-            return Error::new(
-                fn_name.span(),
-                format!("Unknown attribute {fn_name_string}"),
-            )
-            .to_compile_error()
-            .into();
-        }
+        let Ok(item_fn) = list.parse_args::<syn::ItemFn>() else {
+            return Error::new(attr.span(), "Expected valid function definition")
+                .to_compile_error()
+                .into();
+        };
+        table.userfn(item_fn);
     }
 
     let struct_name = table.struct_name;
