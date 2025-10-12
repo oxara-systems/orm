@@ -28,13 +28,19 @@ use uuid::Uuid;
 #[sqlx(transparent)]
 pub struct UserId(pub Uuid);
 
-// define a model on the `users` table, along with two generated functions
+// define a model on the `users` table, along with several generated functions
 // - the type of generated function is based on it's prefix
 //   - get_* returns a Option<T>
 //   - list_* returns a Vec<T>
+// - specifying the return type allows you to use a custom query
+//   - the return type still gets wrapped in `Option` or `Vec` depending on the prefix
+//   - sqlx specific things like type overrides need to be handled manually:
+//     - SEE https://docs.rs/sqlx/latest/sqlx/macro.query.html#type-overrides-output-columns
+//     - {column_names_typed} can be used in custom queries, it will be replaced with a comma separated list of typed column names
 #[derive(Model)]
 #[orm(fn get_by_name(name: &str) { "WHERE name = $1" })]
 #[orm(fn list_adults() { "WHERE age >= 18" })]
+#[orm(fn list_adult_names() -> (String,) { r#"SELECT name as "name: _" WHERE age >= 18"# })]
 pub struct User {
     pub id: UserId,
     pub age: i32,
