@@ -354,6 +354,7 @@ impl Table {
                                 let ret = tuple.elems.first().unwrap();
                                 (quote! { #ret }, true)
                             } else {
+                                // TODO this doesn't actually work; we need to make a struct to hold our tuples values here
                                 (quote! { #ret }, true)
                             }
                         }
@@ -398,6 +399,7 @@ impl Table {
                                 let ret = tuple.elems.first().unwrap();
                                 (quote! { #ret }, true)
                             } else {
+                                // TODO this doesn't actually work; we need to make a struct to hold our tuples values here
                                 (quote! { #ret }, true)
                             }
                         }
