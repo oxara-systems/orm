@@ -260,7 +260,7 @@ impl Table {
             };
             let name = &arg.pat;
             let ty = &arg.ty;
-            params.push(parse_quote! { #name: &#ty });
+            params.push(parse_quote! { #name: #ty });
             bindings.push(quote! { #name as _ });
         }
 
