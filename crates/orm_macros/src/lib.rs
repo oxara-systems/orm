@@ -361,7 +361,10 @@ impl Table {
                             fail!(ret_span, "Return type must be path or tuple");
                         }
                     };
-                    (format!(r#"{query} LIMIT 1"#), ret, is_scalar)
+                    let query = query
+                        .replace("{column_names_typed}", &column_names_typed)
+                        .to_string();
+                    (query, ret, is_scalar)
                 }
             };
             if is_scalar {
@@ -402,6 +405,9 @@ impl Table {
                             fail!(ret_span, "Return type must be path or tuple");
                         }
                     };
+                    let query = query
+                        .replace("{column_names_typed}", &column_names_typed)
+                        .to_string();
                     (query, ret, is_scalar)
                 }
             };
