@@ -377,7 +377,7 @@ impl Table {
             } else {
                 self.fns.push(quote! {
                     pub async fn #fn_name(tx: &mut impl orm::ReadableTransaction, #(#params),*) -> orm::sqlx::Result<Option<#ret>> {
-                        orm::sqlx::query_as!(#struct_name, #sql, #(#bindings),*)
+                        orm::sqlx::query_as!(#ret, #sql, #(#bindings),*)
                             .fetch_optional(tx.connection()).await
                     }
                 });
