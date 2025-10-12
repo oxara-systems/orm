@@ -647,11 +647,12 @@ version = "0.0.0"
 dependencies = [
  "orm",
  "sqlx",
+ "tokio",
 ]
 
 [[package]]
 name = "orm_macros"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "convert_case",
  "proc-macro2",
@@ -881,6 +882,15 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "digest",
+]
+
+[[package]]
+name = "signal-hook-registry"
+version = "1.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b2a4719bff48cee6b39d12c020eeb490953ad2443b7055bd0b21fca26bd8c28b"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -1127,10 +1137,24 @@ dependencies = [
  "io-uring",
  "libc",
  "mio",
+ "parking_lot",
  "pin-project-lite",
+ "signal-hook-registry",
  "slab",
  "socket2",
+ "tokio-macros",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "tokio-macros"
+version = "2.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e06d43f1345a3bcd39f6a56dbb7dcab2ba47e68e8ac134855e7e2bdbaf8cab8"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

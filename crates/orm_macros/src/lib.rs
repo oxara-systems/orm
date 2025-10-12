@@ -3,11 +3,11 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use convert_case::{Case, Casing};
 use proc_macro::TokenStream;
 use proc_macro2::Span;
-use quote::quote;
+use quote::{format_ident, quote};
 use regex::Regex;
 use syn::{
     parse_macro_input, parse_quote, spanned::Spanned, Data, DeriveInput, Error, Expr, Field,
-    Fields, FnArg, Ident, ItemFn, Lit, ReturnType, Stmt,
+    Fields, FnArg, Ident, ItemFn, ItemStruct, Lit, ReturnType, Stmt, Visibility,
 };
 
 struct Table {
@@ -18,6 +18,7 @@ struct Table {
     primary_keys_set: HashSet<Field>,
     struct_name: Ident,
     table_name: String,
+    typs: Vec<proc_macro2::TokenStream>,
 }
 
 impl Table {
@@ -338,96 +339,78 @@ impl Table {
                     }
                 });
             }
-        } else if fn_name_string.starts_with("get_") {
-            let ret_span = ret.span();
-            let (sql, ret, is_scalar) = match ret {
-                ReturnType::Default => (
-                    format!(r#"SELECT {column_names_typed} FROM "{table_name}" {query} LIMIT 1"#),
-                    quote! { Self },
-                    false,
-                ),
+        } else if fn_name_string.starts_with("get_") || fn_name_string.starts_with("list_") {
+            let is_get = fn_name_string.starts_with("get_");
+
+            let (sql, tx, typ) = match ret {
+                ReturnType::Default => {
+                    let sql = format!(
+                        r#"SELECT {column_names_typed} FROM "{table_name}" {query}{}"#,
+                        if is_get { " LIMIT 1" } else { "" }
+                    );
+                    let tx = quote! { &mut impl orm::ReadableTransaction };
+                    let typ = quote! { Self };
+                    (sql, tx, typ)
+                }
                 ReturnType::Type(_, ret) => {
-                    let (ret, is_scalar) = match &*ret {
-                        syn::Type::Path(_) => (quote! { #ret }, false),
-                        syn::Type::Tuple(tuple) => {
-                            if tuple.elems.len() == 1 {
-                                let ret = tuple.elems.first().unwrap();
-                                (quote! { #ret }, true)
-                            } else {
-                                // TODO this doesn't actually work; we need to make a struct to hold our tuples values here
-                                (quote! { #ret }, true)
-                            }
-                        }
-                        _ => {
-                            fail!(ret_span, "Return type must be path or tuple");
-                        }
+                    let is_writable = query
+                        .to_lowercase()
+                        .split_whitespace()
+                        .any(|x| x == "delete" || x == "insert" || x == "update");
+                    let tx = if is_writable {
+                        quote! { &mut impl orm::WritableTransaction }
+                    } else {
+                        quote! { &mut impl orm::ReadableTransaction }
                     };
-                    let query = query
+                    let sql = query
                         .replace("{column_names_typed}", &column_names_typed)
                         .to_string();
-                    (query, ret, is_scalar)
-                }
-            };
-            if is_scalar {
-                self.fns.push(quote! {
-                    pub async fn #fn_name(tx: &mut impl orm::ReadableTransaction, #(#params),*) -> orm::sqlx::Result<Option<#ret>> {
-                        orm::sqlx::query_scalar!(#sql, #(#bindings),*)
-                            .fetch_optional(tx.connection()).await
-                    }
-                });
-            } else {
-                self.fns.push(quote! {
-                    pub async fn #fn_name(tx: &mut impl orm::ReadableTransaction, #(#params),*) -> orm::sqlx::Result<Option<#ret>> {
-                        orm::sqlx::query_as!(#ret, #sql, #(#bindings),*)
-                            .fetch_optional(tx.connection()).await
-                    }
-                });
-            }
-        } else if fn_name_string.starts_with("list_") {
-            let ret_span = ret.span();
-            let (sql, ret, is_scalar) = match ret {
-                ReturnType::Default => (
-                    format!(r#"SELECT {column_names_typed} FROM "{table_name}" {query}"#),
-                    quote! { Self },
-                    false,
-                ),
-                ReturnType::Type(_, ret) => {
-                    let (ret, is_scalar) = match &*ret {
-                        syn::Type::Path(_) => (quote! { #ret }, false),
-                        syn::Type::Tuple(tuple) => {
-                            if tuple.elems.len() == 1 {
-                                let ret = tuple.elems.first().unwrap();
-                                (quote! { #ret }, true)
-                            } else {
-                                // TODO this doesn't actually work; we need to make a struct to hold our tuples values here
-                                (quote! { #ret }, true)
+                    let typ = match &*ret {
+                        syn::Type::Path(_) => {
+                            quote! { #ret }
+                        }
+                        syn::Type::Macro(mac) => {
+                            if !mac.mac.path.is_ident("anon") {
+                                fail!(mac.span(), "Macro name must be anon");
                             }
+                            let fields = &mac.mac.tokens;
+                            let ret = format_ident!(
+                                "{}{}",
+                                self.struct_name.to_string().to_case(Case::Pascal),
+                                fn_name_string.to_case(Case::Pascal)
+                            );
+                            let ret = quote! { #ret };
+                            let mut typ: ItemStruct = parse_quote! {
+                                pub struct #ret {
+                                    #fields
+                                }
+                            };
+                            for field in &mut typ.fields {
+                                field.vis = Visibility::Public(Default::default());
+                            }
+                            self.typs.push(quote! { #typ });
+                            ret
                         }
                         _ => {
-                            fail!(ret_span, "Return type must be path or tuple");
+                            fail!(ret.span(), "Return type must be a struct, or anon! { ... }");
                         }
                     };
-                    let query = query
-                        .replace("{column_names_typed}", &column_names_typed)
-                        .to_string();
-                    (query, ret, is_scalar)
+                    (sql, tx, typ)
                 }
             };
-            if is_scalar {
-                self.fns.push(quote! {
-                    pub async fn #fn_name(tx: &mut impl orm::ReadableTransaction, #(#params),*) -> orm::sqlx::Result<Vec<#ret>> {
-                        orm::sqlx::query_scalar!(#sql, #(#bindings),*)
-                            .fetch_all(tx.connection()).await
-                    }
-                });
+
+            let (func, ret) = if is_get {
+                (format_ident!("fetch_optional"), quote! { Option<#typ> })
             } else {
-                self.fns.push(quote! {
-                    pub async fn #fn_name(tx: &mut impl orm::ReadableTransaction, #(#params),*) -> orm::sqlx::Result<Vec<#ret>> {
-                        orm::sqlx::query_as!(#ret, #sql, #(#bindings),*)
-                            .fetch_all(tx.connection()).await
-                    }
-                });
-            }
+                (format_ident!("fetch_all"), quote! { Vec<#typ> })
+            };
+
+            self.fns.push(quote! {
+                pub async fn #fn_name(tx: #tx, #(#params),*) -> orm::sqlx::Result<#ret> {
+                    orm::sqlx::query_as!(#typ, #sql, #(#bindings),*)
+                        .#func(tx.connection()).await
+                }
+            });
         } else {
             fail!(
                 fn_name.span(),
@@ -546,6 +529,7 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
         primary_keys,
         struct_name,
         table_name,
+        typs: Default::default(),
     };
     table.delete();
     table.get();
@@ -567,9 +551,11 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
         table.userfn(item_fn);
     }
 
+    let typs = table.typs;
     let struct_name = table.struct_name;
     let fns = table.fns;
     TokenStream::from(quote! {
+        #(#typs)*
         impl #struct_name {
             #(#fns)*
         }
