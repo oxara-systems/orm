@@ -6,8 +6,8 @@ use proc_macro2::Span;
 use quote::{format_ident, quote};
 use regex::Regex;
 use syn::{
-    parse_macro_input, parse_quote, spanned::Spanned, Data, DeriveInput, Error, Expr, Field,
-    Fields, FnArg, Ident, ItemFn, ItemStruct, Lit, ReturnType, Stmt, Visibility,
+    parse2, parse_macro_input, parse_quote, spanned::Spanned, Data, DeriveInput, Error, Expr,
+    Field, Fields, FnArg, Ident, ItemFn, ItemStruct, Lit, ReturnType, Stmt, Visibility,
 };
 
 struct Table {
@@ -238,8 +238,21 @@ impl Table {
         let Some(query) = item_fn.block.stmts.first() else {
             fail!(item_fn.block.span(), "expected query string literal");
         };
-        let Stmt::Expr(query, _) = query else {
-            fail!(query.span(), "expected query string literal");
+
+        let (query, is_raw) = match query.clone() {
+            Stmt::Expr(expr, _) => (expr, false),
+            Stmt::Macro(stmt_macro) => {
+                let Ok(expr) = parse2::<Expr>(stmt_macro.mac.tokens) else {
+                    fail!(query.span(), "expected query string literal");
+                };
+                (expr, true)
+            }
+            _ => {
+                fail!(
+                    query.span(),
+                    "expected query string literal or raw! macro call"
+                );
+            }
         };
         let Expr::Lit(query) = query else {
             fail!(query.span(), "expected query string literal");
@@ -249,7 +262,6 @@ impl Table {
         };
         let query = query.value();
 
-        let struct_name = &self.struct_name;
         let table_name = &self.table_name;
         let column_names_typed = self.column_names_typed_sql();
 
@@ -283,20 +295,41 @@ impl Table {
         }
 
         if fn_name_string.starts_with("count_") {
-            let sql = &format!(r#"SELECT COUNT(*) FROM "{table_name}" {query}"#,);
+            let query = if is_raw {
+                query
+            } else {
+                format!(r#"SELECT COUNT(*) FROM "{table_name}" {query}"#)
+            };
             self.fns.push(quote! {
                 pub async fn #fn_name(tx: &mut impl orm::ReadableTransaction, #(#params),*) -> orm::sqlx::Result<i64> {
-                    let count = orm::sqlx::query_scalar!(#sql, #(#bindings),*)
+                    let count = orm::sqlx::query_scalar!(#query, #(#bindings),*)
                         .fetch_one(tx.connection()).await?;
                     Ok(count.unwrap_or_default())
                 }
             });
+        } else if fn_name_string.starts_with("delete_") || fn_name_string.starts_with("update_") {
+            let query = if is_raw {
+                query
+            } else if fn_name_string.starts_with("delete_") {
+                format!(r#"DELETE FROM "{table_name}" {query}"#)
+            } else {
+                format!(r#"UPDATE "{table_name}" {query}"#)
+            };
+            self.fns.push(quote! {
+                pub async fn #fn_name(tx: &mut impl orm::WritableTransaction, #(#params),*) -> orm::sqlx::Result<()> {
+                    orm::sqlx::query!(#query, #(#bindings),*).execute(tx.connection()).await?;
+                    Ok(())
+                }
+            });
         } else if fn_name_string.starts_with("exist_") || fn_name_string.starts_with("is_") {
-            let sql =
-                &format!(r#"SELECT COUNT(*) > 0 AS "bool!" FROM "{table_name}" {query} LIMIT 1"#,);
+            let query = if is_raw {
+                query
+            } else {
+                format!(r#"SELECT COUNT(*) > 0 AS "bool!" FROM "{table_name}" {query} LIMIT 1"#,)
+            };
             self.fns.push(quote! {
                 pub async fn #fn_name(tx: &mut impl orm::ReadableTransaction, #(#params),*) -> orm::sqlx::Result<bool> {
-                    orm::sqlx::query_scalar!(#sql, #(#bindings),*)
+                    orm::sqlx::query_scalar!(#query, #(#bindings),*)
                         .fetch_one(tx.connection()).await
                 }
             });
@@ -305,9 +338,11 @@ impl Table {
                 let field = self.primary_keys.first().unwrap();
                 let name = field.ident.as_ref().unwrap();
                 let ty = &field.ty;
-                let query = &format!(
-                    r#"SELECT "{name}" as "{name}: _" FROM "{table_name}" {query} LIMIT 1"#,
-                );
+                let query = if is_raw {
+                    query
+                } else {
+                    format!(r#"SELECT "{name}" as "{name}: _" FROM "{table_name}" {query} LIMIT 1"#,)
+                };
                 self.fns.push(quote! {
                     pub async fn #fn_name(tx: &mut impl orm::ReadableTransaction, #(#params),*) -> orm::sqlx::Result<Option<#ty>> {
                         orm::sqlx::query_scalar!(#query, #(#bindings),*)
@@ -328,7 +363,11 @@ impl Table {
                     tys.push(ty);
                 }
                 let columns = columns.join(", ");
-                let query = &format!(r#"SELECT {columns} FROM "{table_name}" {query} LIMIT 1"#,);
+                let query = if is_raw {
+                    query
+                } else {
+                    format!(r#"SELECT {columns} FROM "{table_name}" {query} LIMIT 1"#)
+                };
                 self.fns.push(quote! {
                     pub async fn #fn_name(tx: &mut impl orm::ReadableTransaction, #(#params),*) -> orm::sqlx::Result<Option<(#(#tys),*)>> {
                         #[derive(sqlx::FromRow)]
@@ -342,15 +381,19 @@ impl Table {
         } else if fn_name_string.starts_with("get_") || fn_name_string.starts_with("list_") {
             let is_get = fn_name_string.starts_with("get_");
 
-            let (sql, tx, typ) = match ret {
+            let (query, tx, typ) = match ret {
                 ReturnType::Default => {
-                    let sql = format!(
-                        r#"SELECT {column_names_typed} FROM "{table_name}" {query}{}"#,
-                        if is_get { " LIMIT 1" } else { "" }
-                    );
+                    let query = if is_raw {
+                        query
+                    } else {
+                        format!(
+                            r#"SELECT {column_names_typed} FROM "{table_name}" {query}{}"#,
+                            if is_get { " LIMIT 1" } else { "" }
+                        )
+                    };
                     let tx = quote! { &mut impl orm::ReadableTransaction };
                     let typ = quote! { Self };
-                    (sql, tx, typ)
+                    (query, tx, typ)
                 }
                 ReturnType::Type(_, ret) => {
                     let is_writable = query
@@ -362,7 +405,7 @@ impl Table {
                     } else {
                         quote! { &mut impl orm::ReadableTransaction }
                     };
-                    let sql = query
+                    let query = query
                         .replace("{column_names_typed}", &column_names_typed)
                         .to_string();
                     let typ = match &*ret {
@@ -395,7 +438,7 @@ impl Table {
                             fail!(ret.span(), "Return type must be a struct, or anon! { ... }");
                         }
                     };
-                    (sql, tx, typ)
+                    (query, tx, typ)
                 }
             };
 
@@ -407,7 +450,7 @@ impl Table {
 
             self.fns.push(quote! {
                 pub async fn #fn_name(tx: #tx, #(#params),*) -> orm::sqlx::Result<#ret> {
-                    orm::sqlx::query_as!(#typ, #sql, #(#bindings),*)
+                    orm::sqlx::query_as!(#typ, #query, #(#bindings),*)
                         .#func(tx.connection()).await
                 }
             });

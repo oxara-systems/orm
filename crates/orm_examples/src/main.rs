@@ -6,11 +6,14 @@ pub struct Item<T> {
 }
 
 #[derive(Model)]
+#[orm(fn delete_adults() { "WHERE age >= 18" })]
+#[orm(fn delete_adults2() { raw! { "DELETE FROM users WHERE age >= 18" } })]
 #[orm(fn get_name(id: i32) -> anon! { name: String } { "SELECT name from users WHERE name = $1" })]
 #[orm(fn get_by_name(name: &str) { "WHERE name = $1" })]
 #[orm(fn list_adults() { "WHERE age >= 18" })]
 #[orm(fn list_ages() -> anon! { age: i32 } { "SELECT age from users" })]
 #[orm(fn list_items() -> Item::<i32> { "SELECT id, name from users" })]
+#[orm(fn update_adult_ages() { "SET age = age + 1 WHERE age >= 18" })]
 pub struct User {
     pub id: i32,
     pub age: i32,
