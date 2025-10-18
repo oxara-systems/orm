@@ -1,8 +1,9 @@
 [package]
 name = "orm"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 orm_macros = { path = "../orm_macros" }
 sqlx = { version = "0.8.6", default-features = false, features = ["postgres"] }
+tokio = { version = "1", features = ["time"] }

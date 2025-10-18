@@ -22,9 +22,9 @@ pub struct User {
 
 #[tokio::main]
 async fn main() -> sqlx::Result<()> {
-    let db = Db::connect(&std::env::var("DATABASE_URL").unwrap()).await?;
+    let db = Db::<sqlx::Error>::connect(&std::env::var("DATABASE_URL").unwrap()).await?;
 
-    db.write::<_, sqlx::Error>(async |tx| {
+    db.write(async move |tx| {
         User {
             id: 1,
             age: 18,

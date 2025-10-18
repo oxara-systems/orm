@@ -52,8 +52,8 @@ impl Table {
             .collect();
         let query = &format!(r#"DELETE FROM "{table_name}" WHERE {where_clause}"#);
         self.fns.push(quote! {
-            pub async fn delete<'a>(self, tx: &mut impl orm::WritableTransaction) -> orm::sqlx::Result<orm::sqlx::postgres::PgQueryResult> {
-                orm::sqlx::query!(#query, #(#self_bindings),*).execute(tx.connection()).await
+            pub async fn delete<'a>(&self, tx: &mut impl orm::RwTransaction) -> orm::sqlx::Result<orm::sqlx::postgres::PgQueryResult> {
+                orm::sqlx::query!(#query, #(#self_bindings),*).execute(tx.rw_connection()).await
             }
         });
     }
@@ -84,9 +84,9 @@ impl Table {
             r#"SELECT {column_names_typed} FROM "{table_name}" WHERE {where_clause} LIMIT 1"#
         );
         self.fns.push(quote! {
-            pub async fn get(tx: &mut impl orm::ReadableTransaction, #(#params),*) -> orm::sqlx::Result<Option<Self>> {
+            pub async fn get(tx: &mut impl orm::RoTransaction, #(#params),*) -> orm::sqlx::Result<Option<Self>> {
                 orm::sqlx::query_as!(#struct_name, #sql, #(#bindings),*)
-                    .fetch_optional(tx.connection()).await
+                    .fetch_optional(tx.ro_connection()).await
             }
         });
         if self.primary_keys.len() <= 1 {
@@ -99,9 +99,9 @@ impl Table {
                 &format!(r#"SELECT {column_names_typed} FROM "{table_name}" WHERE "{name}" = $1"#);
             let fn_name = Ident::new(&format!("list_by_{name}"), Span::call_site());
             self.fns.push(quote! {
-                pub async fn #fn_name(tx: &mut impl orm::ReadableTransaction, #name: &#ty) -> orm::sqlx::Result<Vec<Self>> {
+                pub async fn #fn_name(tx: &mut impl orm::RoTransaction, #name: &#ty) -> orm::sqlx::Result<Vec<Self>> {
                     orm::sqlx::query_as!(#struct_name, #sql, #name as _)
-                        .fetch_all(tx.connection()).await
+                        .fetch_all(tx.ro_connection()).await
                 }
             });
         }
@@ -130,9 +130,9 @@ impl Table {
             r#"INSERT INTO "{table_name}" ({column_names}) VALUES ({parameters}) RETURNING {return_column_names}"#,
         );
         self.fns.push(quote! {
-            pub async fn insert(self, tx: &mut impl orm::WritableTransaction) -> orm::sqlx::Result<Self> {
+            pub async fn insert(self, tx: &mut impl orm::RwTransaction) -> orm::sqlx::Result<Self> {
                 orm::sqlx::query_as!(#struct_name, #query, #(#bindings),*)
-                    .fetch_one(tx.connection()).await
+                    .fetch_one(tx.rw_connection()).await
             }
         });
     }
@@ -170,8 +170,9 @@ impl Table {
             r#"UPDATE "{table_name}" SET {updates} WHERE {where_clause} RETURNING {return_column_names}"#,
         );
         self.fns.push(quote! {
-            pub async fn update(self, tx: &mut impl orm::WritableTransaction) -> orm::sqlx::Result<Self> {
-                orm::sqlx::query_as!(#struct_name, #query, #(#bindings),*).fetch_one(tx.connection()).await
+            pub async fn update(&mut self, tx: &mut impl orm::RwTransaction) -> orm::sqlx::Result<()> {
+                *self = orm::sqlx::query_as!(#struct_name, #query, #(#bindings),*).fetch_one(tx.rw_connection()).await?;
+                Ok(())
             }
         });
     }
@@ -213,14 +214,43 @@ impl Table {
             r#"INSERT INTO "{table_name}" ({column_names}) VALUES ({parameters}) ON CONFLICT({primary_keys}) DO UPDATE SET {updates} RETURNING {return_column_names}"#,
         );
         self.fns.push(quote! {
-            pub async fn upsert(self, tx: &mut impl orm::WritableTransaction) -> orm::sqlx::Result<Self> {
-                orm::sqlx::query_as!(#struct_name, #query, #(#bindings),*)
-                    .fetch_one(tx.connection()).await
+            pub async fn upsert(&mut self, tx: &mut impl orm::RwTransaction) -> orm::sqlx::Result<()> {
+                *self = orm::sqlx::query_as!(#struct_name, #query, #(#bindings),*)
+                    .fetch_one(tx.rw_connection()).await?;
+                Ok(())
             }
         });
     }
 
     fn userfn(&mut self, item_fn: ItemFn) {
+        fn process_query(
+            query: String,
+            column_names_typed: String,
+        ) -> (String, proc_macro2::TokenStream, Ident) {
+            let query = query
+                .replace("{column_names_typed}", &column_names_typed)
+                .to_string();
+
+            let is_writable = query
+                .to_lowercase()
+                .split_whitespace()
+                .any(|x| x == "delete" || x == "insert" || x == "update");
+
+            if is_writable {
+                (
+                    query,
+                    quote! { &mut impl orm::RwTransaction },
+                    format_ident!("rw_connection"),
+                )
+            } else {
+                (
+                    query,
+                    quote! { &mut impl orm::RoTransaction },
+                    format_ident!("ro_connection"),
+                )
+            }
+        }
+
         macro_rules! fail {
             ($span:expr, $message:expr) => {
                 self.fns
@@ -300,10 +330,11 @@ impl Table {
             } else {
                 format!(r#"SELECT COUNT(*) FROM "{table_name}" {query}"#)
             };
+            let (query, tx, tx_func) = process_query(query, column_names_typed);
             self.fns.push(quote! {
-                pub async fn #fn_name(tx: &mut impl orm::ReadableTransaction, #(#params),*) -> orm::sqlx::Result<i64> {
+                pub async fn #fn_name(tx: #tx, #(#params),*) -> orm::sqlx::Result<i64> {
                     let count = orm::sqlx::query_scalar!(#query, #(#bindings),*)
-                        .fetch_one(tx.connection()).await?;
+                        .fetch_one(tx.#tx_func()).await?;
                     Ok(count.unwrap_or_default())
                 }
             });
@@ -315,9 +346,10 @@ impl Table {
             } else {
                 format!(r#"UPDATE "{table_name}" {query}"#)
             };
+            let (query, tx, tx_func) = process_query(query, column_names_typed);
             self.fns.push(quote! {
-                pub async fn #fn_name(tx: &mut impl orm::WritableTransaction, #(#params),*) -> orm::sqlx::Result<()> {
-                    orm::sqlx::query!(#query, #(#bindings),*).execute(tx.connection()).await?;
+                pub async fn #fn_name(tx: #tx, #(#params),*) -> orm::sqlx::Result<()> {
+                    orm::sqlx::query!(#query, #(#bindings),*).execute(tx.#tx_func()).await?;
                     Ok(())
                 }
             });
@@ -327,10 +359,11 @@ impl Table {
             } else {
                 format!(r#"SELECT COUNT(*) > 0 AS "bool!" FROM "{table_name}" {query} LIMIT 1"#,)
             };
+            let (query, tx, tx_func) = process_query(query, column_names_typed);
             self.fns.push(quote! {
-                pub async fn #fn_name(tx: &mut impl orm::ReadableTransaction, #(#params),*) -> orm::sqlx::Result<bool> {
+                pub async fn #fn_name(tx: #tx, #(#params),*) -> orm::sqlx::Result<bool> {
                     orm::sqlx::query_scalar!(#query, #(#bindings),*)
-                        .fetch_one(tx.connection()).await
+                        .fetch_one(tx.#tx_func()).await
                 }
             });
         } else if fn_name_string.starts_with("get_id_") {
@@ -343,10 +376,11 @@ impl Table {
                 } else {
                     format!(r#"SELECT "{name}" as "{name}: _" FROM "{table_name}" {query} LIMIT 1"#,)
                 };
+                let (query, tx, tx_func) = process_query(query, column_names_typed);
                 self.fns.push(quote! {
-                    pub async fn #fn_name(tx: &mut impl orm::ReadableTransaction, #(#params),*) -> orm::sqlx::Result<Option<#ty>> {
+                    pub async fn #fn_name(tx: #tx, #(#params),*) -> orm::sqlx::Result<Option<#ty>> {
                         orm::sqlx::query_scalar!(#query, #(#bindings),*)
-                            .fetch_optional(tx.connection()).await
+                            .fetch_optional(tx.#tx_func()).await
                     }
                 });
             } else {
@@ -368,12 +402,13 @@ impl Table {
                 } else {
                     format!(r#"SELECT {columns} FROM "{table_name}" {query} LIMIT 1"#)
                 };
+                let (query, tx, tx_func) = process_query(query, column_names_typed);
                 self.fns.push(quote! {
-                    pub async fn #fn_name(tx: &mut impl orm::ReadableTransaction, #(#params),*) -> orm::sqlx::Result<Option<(#(#tys),*)>> {
+                    pub async fn #fn_name(tx: #tx, #(#params),*) -> orm::sqlx::Result<Option<(#(#tys),*)>> {
                         #[derive(sqlx::FromRow)]
                         struct Ids { #(#fields),* };
                         let ids = orm::sqlx::query_as!(Ids, #query, #(#bindings),*)
-                            .fetch_optional(tx.connection()).await?;
+                            .fetch_optional(tx.#tx_func()).await?;
                         Ok(ids.map(|ids| (#(#ret),*)))
                     }
                 });
@@ -381,7 +416,7 @@ impl Table {
         } else if fn_name_string.starts_with("get_") || fn_name_string.starts_with("list_") {
             let is_get = fn_name_string.starts_with("get_");
 
-            let (query, tx, typ) = match ret {
+            let (query, typ) = match ret {
                 ReturnType::Default => {
                     let query = if is_raw {
                         query
@@ -391,23 +426,10 @@ impl Table {
                             if is_get { " LIMIT 1" } else { "" }
                         )
                     };
-                    let tx = quote! { &mut impl orm::ReadableTransaction };
                     let typ = quote! { Self };
-                    (query, tx, typ)
+                    (query, typ)
                 }
                 ReturnType::Type(_, ret) => {
-                    let is_writable = query
-                        .to_lowercase()
-                        .split_whitespace()
-                        .any(|x| x == "delete" || x == "insert" || x == "update");
-                    let tx = if is_writable {
-                        quote! { &mut impl orm::WritableTransaction }
-                    } else {
-                        quote! { &mut impl orm::ReadableTransaction }
-                    };
-                    let query = query
-                        .replace("{column_names_typed}", &column_names_typed)
-                        .to_string();
                     let typ = match &*ret {
                         syn::Type::Path(_) => {
                             quote! { #ret }
@@ -438,7 +460,7 @@ impl Table {
                             fail!(ret.span(), "Return type must be a struct, or anon! { ... }");
                         }
                     };
-                    (query, tx, typ)
+                    (query, typ)
                 }
             };
 
@@ -448,10 +470,11 @@ impl Table {
                 (format_ident!("fetch_all"), quote! { Vec<#typ> })
             };
 
+            let (query, tx, tx_func) = process_query(query, column_names_typed);
             self.fns.push(quote! {
                 pub async fn #fn_name(tx: #tx, #(#params),*) -> orm::sqlx::Result<#ret> {
                     orm::sqlx::query_as!(#typ, #query, #(#bindings),*)
-                        .#func(tx.connection()).await
+                        .#func(tx.#tx_func()).await
                 }
             });
         } else {

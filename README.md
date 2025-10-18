@@ -53,7 +53,7 @@ async fn main() {
 
     // start a writable transaction
     // returning an error will rollback the transaction
-    db.write(async |tx| {
+    db.write(async move |tx| {
         let id = UserId(Uuid::new_v4());
 
         // create a user
@@ -80,7 +80,7 @@ async fn main() {
     // start a read only transaction
     // - orm_macro generated functions that take a WritableTransaction can't be called here
     // - PostgreSQL should throw an error if you attempt to write in here
-    db.read(async |tx| {
+    db.read(async move |tx| {
         if let Some(user) = User::get_by_name(tx, "Test").await? {
             println!("{} exists", user.name);
         }
