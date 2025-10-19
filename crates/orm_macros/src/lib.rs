@@ -130,9 +130,10 @@ impl Table {
             r#"INSERT INTO "{table_name}" ({column_names}) VALUES ({parameters}) RETURNING {return_column_names}"#,
         );
         self.fns.push(quote! {
-            pub async fn insert(self, tx: &mut impl orm::RwTransaction) -> orm::sqlx::Result<Self> {
-                orm::sqlx::query_as!(#struct_name, #query, #(#bindings),*)
-                    .fetch_one(tx.rw_connection()).await
+            pub async fn insert(&mut self, tx: &mut impl orm::RwTransaction) -> orm::sqlx::Result<()> {
+                *self = orm::sqlx::query_as!(#struct_name, #query, #(#bindings),*)
+                    .fetch_one(tx.rw_connection()).await?;
+                Ok(())
             }
         });
     }
