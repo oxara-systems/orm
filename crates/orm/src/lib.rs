@@ -83,13 +83,21 @@ impl<E: From<sqlx::Error> + Into<E> + SqlxError> Db<E> {
         })
     }
 
-    pub async fn read<T>(
+    pub async fn _read<T>(
         &self,
+        deferrable: bool,
         mut cb: impl AsyncFnMut(&mut ReadTransaction) -> Result<T, E>,
     ) -> Result<T, E> {
         let mut retries = 0;
         loop {
-            let tx = self.store.begin_with("begin transaction read only").await?;
+            let tx = self
+                .store
+                .begin_with(if deferrable {
+                    "BEGIN TRANSACTION READ ONLY DEFERRABLE"
+                } else {
+                    "BEGIN TRANSACTION READ ONLY"
+                })
+                .await?;
             let mut tx = ReadTransaction(tx);
             match cb(&mut tx).await {
                 Ok(r) => {
@@ -114,6 +122,20 @@ impl<E: From<sqlx::Error> + Into<E> + SqlxError> Db<E> {
         }
     }
 
+    pub async fn read<T>(
+        &self,
+        cb: impl AsyncFnMut(&mut ReadTransaction) -> Result<T, E>,
+    ) -> Result<T, E> {
+        self._read(false, cb).await
+    }
+
+    pub async fn read_deferrable<T>(
+        &self,
+        cb: impl AsyncFnMut(&mut ReadTransaction) -> Result<T, E>,
+    ) -> Result<T, E> {
+        self._read(true, cb).await
+    }
+
     pub async fn write<T>(
         &self,
         mut cb: impl AsyncFnMut(&mut WriteTransaction) -> Result<T, E>,
@@ -122,7 +144,7 @@ impl<E: From<sqlx::Error> + Into<E> + SqlxError> Db<E> {
         loop {
             let tx = self
                 .store
-                .begin_with("begin transaction read write")
+                .begin_with("BEGIN TRANSACTION READ WRITE")
                 .await?;
             let mut tx = WriteTransaction(tx);
             match cb(&mut tx).await {
