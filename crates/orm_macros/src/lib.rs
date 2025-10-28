@@ -418,7 +418,7 @@ impl Table {
         } else if fn_name_string.starts_with("get_") || fn_name_string.starts_with("list_") {
             let is_get = fn_name_string.starts_with("get_");
 
-            let (query, typ) = match ret {
+            let (query, typ, is_optional) = match ret {
                 ReturnType::Default => {
                     let query = if is_raw {
                         query
@@ -429,17 +429,19 @@ impl Table {
                         )
                     };
                     let typ = quote! { Self };
-                    (query, typ)
+                    (query, typ, true)
                 }
                 ReturnType::Type(_, ret) => {
-                    let typ = match &*ret {
-                        syn::Type::Path(_) => {
-                            quote! { #ret }
-                        }
+                    let (typ, is_optional) = match &*ret {
+                        syn::Type::Path(_) => (quote! { #ret }, true),
                         syn::Type::Macro(mac) => {
-                            if !mac.mac.path.is_ident("anon") {
-                                fail!(mac.span(), "Macro name must be anon");
-                            }
+                            let is_optional = if mac.mac.path.is_ident("optional") {
+                                true
+                            } else if mac.mac.path.is_ident("required") {
+                                false
+                            } else {
+                                fail!(mac.span(), "Macro name must be optional or required");
+                            };
                             let fields = &mac.mac.tokens;
                             let ret = format_ident!(
                                 "{}{}",
@@ -456,18 +458,22 @@ impl Table {
                                 field.vis = Visibility::Public(Default::default());
                             }
                             self.typs.push(quote! { #typ });
-                            ret
+                            (ret, is_optional)
                         }
                         _ => {
-                            fail!(ret.span(), "Return type must be a struct, or anon! { ... }");
+                            fail!(ret.span(), "Return type must be a struct, optional! { ... }, or required! { ... }");
                         }
                     };
-                    (query, typ)
+                    (query, typ, is_optional)
                 }
             };
 
             let (func, ret) = if is_get {
-                (format_ident!("fetch_optional"), quote! { Option<#typ> })
+                if is_optional {
+                    (format_ident!("fetch_optional"), quote! { Option<#typ> })
+                } else {
+                    (format_ident!("fetch_one"), quote! { #typ })
+                }
             } else {
                 (format_ident!("fetch_all"), quote! { Vec<#typ> })
             };
