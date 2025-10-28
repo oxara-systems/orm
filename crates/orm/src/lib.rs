@@ -83,11 +83,10 @@ impl<E: From<sqlx::Error> + Into<E> + SqlxError> Db<E> {
         })
     }
 
-    pub async fn _read<T>(
-        &self,
-        deferrable: bool,
-        mut cb: impl AsyncFnMut(&mut ReadTransaction) -> Result<T, E>,
-    ) -> Result<T, E> {
+    pub async fn _read<T, F>(&self, deferrable: bool, cb: F) -> Result<T, E>
+    where
+        F: AsyncFnOnce(&mut ReadTransaction) -> Result<T, E> + Clone,
+    {
         let mut retries = 0;
         loop {
             let tx = self
@@ -99,7 +98,7 @@ impl<E: From<sqlx::Error> + Into<E> + SqlxError> Db<E> {
                 })
                 .await?;
             let mut tx = ReadTransaction(tx);
-            match cb(&mut tx).await {
+            match cb.clone()(&mut tx).await {
                 Ok(r) => {
                     if let Err(err) = tx.0.commit().await {
                         if retries < 10 && Self::is_retryable_error(&err).await {
@@ -122,24 +121,24 @@ impl<E: From<sqlx::Error> + Into<E> + SqlxError> Db<E> {
         }
     }
 
-    pub async fn read<T>(
-        &self,
-        cb: impl AsyncFnMut(&mut ReadTransaction) -> Result<T, E>,
-    ) -> Result<T, E> {
+    pub async fn read<T, F>(&self, cb: F) -> Result<T, E>
+    where
+        F: AsyncFnOnce(&mut ReadTransaction) -> Result<T, E> + Clone,
+    {
         self._read(false, cb).await
     }
 
-    pub async fn read_deferrable<T>(
-        &self,
-        cb: impl AsyncFnMut(&mut ReadTransaction) -> Result<T, E>,
-    ) -> Result<T, E> {
+    pub async fn read_deferrable<T, F>(&self, cb: F) -> Result<T, E>
+    where
+        F: AsyncFnOnce(&mut ReadTransaction) -> Result<T, E> + Clone,
+    {
         self._read(true, cb).await
     }
 
-    pub async fn write<T>(
-        &self,
-        mut cb: impl AsyncFnMut(&mut WriteTransaction) -> Result<T, E>,
-    ) -> Result<T, E> {
+    pub async fn write<T, F>(&self, cb: F) -> Result<T, E>
+    where
+        F: AsyncFnOnce(&mut WriteTransaction) -> Result<T, E> + Clone,
+    {
         let mut retries = 0;
         loop {
             let tx = self
@@ -147,8 +146,13 @@ impl<E: From<sqlx::Error> + Into<E> + SqlxError> Db<E> {
                 .begin_with("BEGIN TRANSACTION READ WRITE")
                 .await?;
             let mut tx = WriteTransaction(tx);
-            match cb(&mut tx).await {
+            match cb.clone()(&mut tx).await {
                 Ok(r) => {
+                    if retries < 10 {
+                        tx.0.rollback().await?;
+                        retries += 1;
+                        continue;
+                    }
                     if let Err(err) = tx.0.commit().await {
                         if retries < 10 && Self::is_retryable_error(&err).await {
                             retries += 1;

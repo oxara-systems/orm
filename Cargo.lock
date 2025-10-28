@@ -635,7 +635,7 @@ checksum = "42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d"
 
 [[package]]
 name = "orm"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "orm_macros",
  "sqlx",
@@ -653,7 +653,7 @@ dependencies = [
 
 [[package]]
 name = "orm_macros"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "convert_case",
  "proc-macro2",
