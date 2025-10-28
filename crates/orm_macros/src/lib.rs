@@ -131,10 +131,9 @@ impl Table {
             r#"INSERT INTO "{table_name}" ({column_names}) VALUES ({parameters}) RETURNING {return_column_names}"#,
         );
         self.fns.push(quote! {
-            pub async fn insert(&mut self, tx: &mut impl orm::RwTransaction) -> orm::sqlx::Result<()> {
-                *self = orm::sqlx::query_as!(#struct_name, #query, #(#bindings),*)
-                    .fetch_one(tx.rw_connection()).await?;
-                Ok(())
+            pub async fn insert(self, tx: &mut impl orm::RwTransaction) -> orm::sqlx::Result<Self> {
+                orm::sqlx::query_as!(#struct_name, #query, #(#bindings),*)
+                    .fetch_one(tx.rw_connection()).await
             }
         });
     }
@@ -172,9 +171,8 @@ impl Table {
             r#"UPDATE "{table_name}" SET {updates} WHERE {where_clause} RETURNING {return_column_names}"#,
         );
         self.fns.push(quote! {
-            pub async fn update(&mut self, tx: &mut impl orm::RwTransaction) -> orm::sqlx::Result<()> {
-                *self = orm::sqlx::query_as!(#struct_name, #query, #(#bindings),*).fetch_one(tx.rw_connection()).await?;
-                Ok(())
+            pub async fn update(self, tx: &mut impl orm::RwTransaction) -> orm::sqlx::Result<Self> {
+                orm::sqlx::query_as!(#struct_name, #query, #(#bindings),*).fetch_one(tx.rw_connection()).await
             }
         });
     }
@@ -216,10 +214,9 @@ impl Table {
             r#"INSERT INTO "{table_name}" ({column_names}) VALUES ({parameters}) ON CONFLICT({primary_keys}) DO UPDATE SET {updates} RETURNING {return_column_names}"#,
         );
         self.fns.push(quote! {
-            pub async fn upsert(&mut self, tx: &mut impl orm::RwTransaction) -> orm::sqlx::Result<()> {
-                *self = orm::sqlx::query_as!(#struct_name, #query, #(#bindings),*)
-                    .fetch_one(tx.rw_connection()).await?;
-                Ok(())
+            pub async fn upsert(self, tx: &mut impl orm::RwTransaction) -> orm::sqlx::Result<Self> {
+                orm::sqlx::query_as!(#struct_name, #query, #(#bindings),*)
+                    .fetch_one(tx.rw_connection()).await
             }
         });
     }
