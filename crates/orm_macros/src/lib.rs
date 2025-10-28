@@ -31,7 +31,8 @@ impl Table {
                 //     panic!("expected type to be a path");
                 // };
                 format!(
-                    r#""{name}" as "{name}: _""#,
+                    r#""{}"."{name}" as "{name}: _""#,
+                    self.table_name,
                     // ty.path.to_token_stream().to_string()
                 )
             })
