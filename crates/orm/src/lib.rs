@@ -148,11 +148,6 @@ impl<E: From<sqlx::Error> + Into<E> + SqlxError> Db<E> {
             let mut tx = WriteTransaction(tx);
             match cb.clone()(&mut tx).await {
                 Ok(r) => {
-                    if retries < 10 {
-                        tx.0.rollback().await?;
-                        retries += 1;
-                        continue;
-                    }
                     if let Err(err) = tx.0.commit().await {
                         if retries < 10 && Self::is_retryable_error(&err).await {
                             retries += 1;
