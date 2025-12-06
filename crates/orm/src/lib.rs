@@ -59,14 +59,13 @@ impl SqlxError for sqlx::Error {
 }
 
 impl<E: From<sqlx::Error> + Into<E> + SqlxError> Db<E> {
-    async fn is_retryable_error(err: &impl SqlxError) -> bool {
+    fn is_retryable_error(err: &impl SqlxError) -> bool {
         if let Some(code) = err
             .sqlx_error()
             .and_then(|x| x.as_database_error())
             .and_then(|x| x.code())
         {
             if code == "40001" {
-                tokio::time::sleep(Duration::from_millis(10)).await;
                 return true;
             } else {
                 println!("{code} occurred");
@@ -101,8 +100,9 @@ impl<E: From<sqlx::Error> + Into<E> + SqlxError> Db<E> {
             match cb.clone()(&mut tx).await {
                 Ok(r) => {
                     if let Err(err) = tx.0.commit().await {
-                        if retries < 10 && Self::is_retryable_error(&err).await {
+                        if retries < 10 && Self::is_retryable_error(&err) {
                             retries += 1;
+                            tokio::time::sleep(Duration::from_millis(10 * retries)).await;
                             continue;
                         }
                         Err(err)?;
@@ -111,8 +111,9 @@ impl<E: From<sqlx::Error> + Into<E> + SqlxError> Db<E> {
                 }
                 Err(err) => {
                     tx.0.rollback().await?;
-                    if retries < 10 && Self::is_retryable_error(&err).await {
+                    if retries < 10 && Self::is_retryable_error(&err) {
                         retries += 1;
+                        tokio::time::sleep(Duration::from_millis(10 * retries)).await;
                         continue;
                     }
                     return Err(err);
@@ -149,8 +150,9 @@ impl<E: From<sqlx::Error> + Into<E> + SqlxError> Db<E> {
             match cb.clone()(&mut tx).await {
                 Ok(r) => {
                     if let Err(err) = tx.0.commit().await {
-                        if retries < 10 && Self::is_retryable_error(&err).await {
+                        if retries < 10 && Self::is_retryable_error(&err) {
                             retries += 1;
+                            tokio::time::sleep(Duration::from_millis(10 * retries)).await;
                             continue;
                         }
                         Err(err)?;
@@ -159,8 +161,9 @@ impl<E: From<sqlx::Error> + Into<E> + SqlxError> Db<E> {
                 }
                 Err(err) => {
                     tx.0.rollback().await?;
-                    if retries < 10 && Self::is_retryable_error(&err).await {
+                    if retries < 10 && Self::is_retryable_error(&err) {
                         retries += 1;
+                        tokio::time::sleep(Duration::from_millis(10 * retries)).await;
                         continue;
                     }
                     return Err(err);
