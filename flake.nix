@@ -31,6 +31,7 @@
           mkShell {
             buildInputs = [
               rust-bin.nightly.latest.complete
+              postgresql
             ];
           };
       }
