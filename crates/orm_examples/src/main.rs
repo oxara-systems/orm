@@ -1,4 +1,4 @@
-use orm::{Db, Model};
+use orm::{Db, Model, RwTransaction};
 
 pub struct Item<T> {
     pub id: T,
@@ -6,6 +6,7 @@ pub struct Item<T> {
 }
 
 #[derive(Debug, Model)]
+#[orm(fn delete_all() { "" })]
 #[orm(fn delete_adults() { "WHERE age >= 18" })]
 #[orm(fn delete_adults2() { raw! { "DELETE FROM users WHERE age >= 18" } })]
 #[orm(fn get_name(id: i32) -> optional! { name: String } { "SELECT name from users WHERE name = $1" })]
@@ -22,11 +23,20 @@ pub struct User {
 
 #[tokio::main]
 async fn main() -> sqlx::Result<()> {
-    let db = Db::<sqlx::Error>::connect(&std::env::var("DATABASE_URL").unwrap()).await?;
+    let mut db = Db::<sqlx::Error>::connect(&std::env::var("DATABASE_URL").unwrap()).await?;
+
+    db.set("app.tenant_id", "123");
 
     let mut age = 18;
 
     db.write(async move |tx| {
+        User::delete_all(tx).await?;
+
+        let value: Option<String> = sqlx::query_scalar("SELECT current_setting('app.tenant_id')")
+            .fetch_one(tx.rw_connection())
+            .await?;
+        assert_eq!(value.unwrap(), "123");
+
         age += 1;
         let user = User {
             id: 1,

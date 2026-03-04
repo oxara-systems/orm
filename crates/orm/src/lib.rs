@@ -40,6 +40,7 @@ impl<'a> RwTransaction for WriteTransaction<'a> {
 
 pub struct Db<E: From<sqlx::Error> + Into<E> + SqlxError> {
     e: PhantomData<E>,
+    parameters: Vec<(String, String)>,
     pub store: Pool<Postgres>,
 }
 
@@ -47,6 +48,7 @@ impl<E: From<sqlx::Error> + Into<E> + SqlxError> Clone for Db<E> {
     fn clone(&self) -> Self {
         Self {
             e: PhantomData,
+            parameters: Vec::new(),
             store: self.store.clone(),
         }
     }
@@ -78,6 +80,7 @@ impl<E: From<sqlx::Error> + Into<E> + SqlxError> Db<E> {
         let store = Pool::connect(url).await?;
         Ok(Self {
             e: PhantomData,
+            parameters: Vec::new(),
             store,
         })
     }
@@ -88,7 +91,7 @@ impl<E: From<sqlx::Error> + Into<E> + SqlxError> Db<E> {
     {
         let mut retries = 0;
         loop {
-            let tx = self
+            let mut tx = self
                 .store
                 .begin_with(if deferrable {
                     "BEGIN TRANSACTION READ ONLY DEFERRABLE"
@@ -96,6 +99,13 @@ impl<E: From<sqlx::Error> + Into<E> + SqlxError> Db<E> {
                     "BEGIN TRANSACTION READ ONLY"
                 })
                 .await?;
+            for (key, value) in &self.parameters {
+                sqlx::query("SELECT set_config($1, $2, true)")
+                    .bind(key)
+                    .bind(value)
+                    .execute(&mut *tx)
+                    .await?;
+            }
             let mut tx = ReadTransaction(tx);
             match cb.clone()(&mut tx).await {
                 Ok(r) => {
@@ -136,16 +146,28 @@ impl<E: From<sqlx::Error> + Into<E> + SqlxError> Db<E> {
         self._read(true, cb).await
     }
 
+    pub fn set(&mut self, key: impl ToString, value: impl ToString) -> &mut Self {
+        self.parameters.push((key.to_string(), value.to_string()));
+        self
+    }
+
     pub async fn write<T, F>(&self, cb: F) -> Result<T, E>
     where
         F: AsyncFnOnce(&mut WriteTransaction) -> Result<T, E> + Clone,
     {
         let mut retries = 0;
         loop {
-            let tx = self
+            let mut tx = self
                 .store
                 .begin_with("BEGIN TRANSACTION READ WRITE")
                 .await?;
+            for (key, value) in &self.parameters {
+                sqlx::query("SELECT set_config($1, $2, true)")
+                    .bind(key)
+                    .bind(value)
+                    .execute(&mut *tx)
+                    .await?;
+            }
             let mut tx = WriteTransaction(tx);
             match cb.clone()(&mut tx).await {
                 Ok(r) => {
