@@ -76,13 +76,20 @@ impl<E: From<sqlx::Error> + Into<E> + SqlxError> Db<E> {
         false
     }
 
-    pub async fn connect(url: &str) -> Result<Self> {
-        let store = Pool::connect(url).await?;
-        Ok(Self {
+    fn new(store: Pool<Postgres>) -> Self {
+        Self {
             e: PhantomData,
             parameters: Vec::new(),
             store,
-        })
+        }
+    }
+
+    pub async fn connect(url: &str) -> Result<Self> {
+        Ok(Self::new(Pool::connect(url).await?))
+    }
+
+    pub fn connect_lazy(url: &str) -> Result<Self> {
+        Ok(Self::new(Pool::connect_lazy(url)?))
     }
 
     pub async fn _read<T, F>(&self, deferrable: bool, cb: F) -> Result<T, E>

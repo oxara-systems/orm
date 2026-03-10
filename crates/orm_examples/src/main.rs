@@ -23,7 +23,7 @@ pub struct User {
 
 #[tokio::main]
 async fn main() -> sqlx::Result<()> {
-    let mut db = Db::<sqlx::Error>::connect(&std::env::var("DATABASE_URL").unwrap()).await?;
+    let mut db = Db::<sqlx::Error>::connect_lazy(&std::env::var("DATABASE_URL").unwrap())?;
 
     db.set("app.tenant_id", "123");
 
