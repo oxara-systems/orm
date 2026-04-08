@@ -1,6 +1,7 @@
 use std::{marker::PhantomData, time::Duration};
 
 pub use orm_macros::*;
+use rand::RngExt;
 pub use sqlx;
 
 use sqlx::{PgConnection, PgTransaction, Pool, Postgres, Result};
@@ -119,7 +120,7 @@ impl<E: From<sqlx::Error> + Into<E> + SqlxError> Db<E> {
                     if let Err(err) = tx.0.commit().await {
                         if retries < 10 && Self::is_retryable_error(&err) {
                             retries += 1;
-                            tokio::time::sleep(Duration::from_millis(10 * retries)).await;
+                            sleep(retries).await;
                             continue;
                         }
                         Err(err)?;
@@ -130,7 +131,7 @@ impl<E: From<sqlx::Error> + Into<E> + SqlxError> Db<E> {
                     tx.0.rollback().await?;
                     if retries < 10 && Self::is_retryable_error(&err) {
                         retries += 1;
-                        tokio::time::sleep(Duration::from_millis(10 * retries)).await;
+                        sleep(retries).await;
                         continue;
                     }
                     return Err(err);
@@ -181,7 +182,7 @@ impl<E: From<sqlx::Error> + Into<E> + SqlxError> Db<E> {
                     if let Err(err) = tx.0.commit().await {
                         if retries < 10 && Self::is_retryable_error(&err) {
                             retries += 1;
-                            tokio::time::sleep(Duration::from_millis(10 * retries)).await;
+                            sleep(retries).await;
                             continue;
                         }
                         Err(err)?;
@@ -192,7 +193,7 @@ impl<E: From<sqlx::Error> + Into<E> + SqlxError> Db<E> {
                     tx.0.rollback().await?;
                     if retries < 10 && Self::is_retryable_error(&err) {
                         retries += 1;
-                        tokio::time::sleep(Duration::from_millis(10 * retries)).await;
+                        sleep(retries).await;
                         continue;
                     }
                     return Err(err);
@@ -200,4 +201,11 @@ impl<E: From<sqlx::Error> + Into<E> + SqlxError> Db<E> {
             }
         }
     }
+}
+
+async fn sleep(retries: u64) {
+    let jitter: u64 = rand::rng().random_range(..50);
+    let duration = Duration::from_millis(10 * retries + jitter);
+    println!("Sleeping {duration:?}");
+    tokio::time::sleep(duration).await;
 }
